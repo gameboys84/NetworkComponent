@@ -1,6 +1,4 @@
-using System;
 using System.Collections;
-using GameLogic;
 using TPFramework;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -36,8 +34,9 @@ public class Boot : MonoBehaviour
         // 资源加载
         
         // 初始化各模块
-        
-        yield return new WaitForSeconds(1);
+        InitNetModule();
+
+        yield return new WaitForEndOfFrame();
     }
 
     public static void Reboot()
@@ -56,9 +55,9 @@ public class Boot : MonoBehaviour
         NetMessageMgr.Reset();
     }
 
-    void Start()
+    void InitNetModule()
     {
-        NetworkManager.Instance.Initialize(); // .Coroutine();
+        NetMain.Instance.Initialize(); // .Coroutine();
     }
 
 }

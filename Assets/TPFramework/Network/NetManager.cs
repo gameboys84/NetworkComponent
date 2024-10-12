@@ -1,6 +1,5 @@
 
 using System.Collections.Generic;
-using TPFramework;
 using UnityEngine;
 
 namespace TPFramework
@@ -18,6 +17,11 @@ namespace TPFramework
                 DLog.Log("Connect success");
                 // 连接服务器成功， 可以开启心跳
                 NetMessageMgr.OnConnectSuccess();
+            });
+            
+            session.Register(msg =>
+            {
+                NetMessageMgr.messageQueue.Add(msg);
             });
         }
         

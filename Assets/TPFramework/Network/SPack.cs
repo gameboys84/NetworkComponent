@@ -112,6 +112,17 @@ namespace TPFramework
             Array.Copy(val, 0, buf, offset, val.Length);
             offset += val.Length;
         }
+        
+        public void Write(byte[] val, int length)
+        {
+            if (buf.Length < offset + length)
+            {
+                Array.Resize(ref buf, offset * 2 + length);
+            }
+
+            Array.Copy(val, 0, buf, offset, length);
+            offset += length;
+        }
 
         public void Write(Int16 val) {
             val = IPAddress.HostToNetworkOrder(val);

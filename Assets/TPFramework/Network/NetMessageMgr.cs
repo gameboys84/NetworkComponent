@@ -1,5 +1,8 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using Google.Protobuf;
+using Protocol;
 using UnityEngine;
 
 namespace TPFramework
@@ -8,15 +11,14 @@ namespace TPFramework
     {
         public string ip;
         public int port;
-        // public string chatproxy;
         public int retryTime;
     }
 
     public class NetMessageMgr
     {
-        public static bool DebugLog = false;
+        public static bool DebugLog = true;
 
-        public delegate bool MessageCallback(Protocol.MsgType msgType, NetworkMessage content);
+        public delegate bool MessageCallback(int msgType, NetworkMessage content);
 
         public delegate void MessageHandler(NetworkMessage content);
 
@@ -29,12 +31,13 @@ namespace TPFramework
             public bool WaitingShow = false;
             public float WaitingDelay = -1;
             public NetFailedCallback NetFailedCallback;
-            public Protocol.MsgType MsgType;
+            public int MsgType;
             public float TimeOut = -1;
             public bool alreadyTimeOut = false;
         }
 
         public static readonly List<NetworkMessage> messageQueue = new List<NetworkMessage>();
+        // public static readonly List<IMessage> messageQueue2 = new List<IMessage>();
 
         public const int HEARTBEATT_INTERVAL = 15000;
 
@@ -45,12 +48,9 @@ namespace TPFramework
         public static int QuickReconnCount = 0; // 快速重连次数
         private static bool WillReconnectLater = false; // 是否即将重连
 
-        private static float
-            ReconnectDelayTimer = 0; // 重连计时，当WillReconnectLater为true时，表示即将重连， 当计时>ReconnectDelayTimeMax时 开始进行重连
+        private static float ReconnectDelayTimer = 0; // 重连计时，当WillReconnectLater为true时，表示即将重连， 当计时>ReconnectDelayTimeMax时 开始进行重连
 
-        private static int
-            ReconnectDelayTimeMax =
-                0; // 每次尝试重连都会额外延时尝试的时间， 时间为 (RECONNECT_DELAY_TIME_BASE + QuickReconnCount * RECONNECT_DELAY_TIME_ACC)
+        private static int ReconnectDelayTimeMax = 0; // 每次尝试重连都会额外延时尝试的时间， 时间为 (RECONNECT_DELAY_TIME_BASE + QuickReconnCount * RECONNECT_DELAY_TIME_ACC)
 
         public static int pendingProxyIndx = 0; // 多个网关时，当前使用的网关索引
         private static bool ConnectingServer = false; // 是否正在连接网关
@@ -72,10 +72,11 @@ namespace TPFramework
         public static readonly List<Data> CallbackList = new List<Data>(); // 指定了手动回调处理的消息
         private static readonly List<NetFailedCallback> CallbacksWhenReconnect = new List<NetFailedCallback>();
 
-        private static readonly Dictionary<Protocol.MsgType, MessageHandler> NetMsgHandles =
-            new Dictionary<Protocol.MsgType, MessageHandler>(); // 预定义的消息处理方法
+        private static readonly Dictionary<int, MessageHandler> NetMsgHandles =
+            new Dictionary<int, MessageHandler>(); // 预定义的消息处理方法
 
         public static List<ProxyInfo> proxy_list = new List<ProxyInfo>();
+        public static Action onConnectCompleted, onConnectDisconnected, onConnectFailed;
 
         public enum ConnectCode
         {
@@ -84,7 +85,9 @@ namespace TPFramework
             HeartBeatTimeout, // 心跳超时
             LoginTimeout, // 登陆超时
             SendFailed, // 消息发送失败
-            ReadDataError, // 读取数据错误
+            ReadHeadDataError, // 读取包头数据错误
+            ReadBodyDataError, // 读取包体数据错误
+            ReadZeroData, // 读取到0字节数据
         }
 
         public enum HeartbeatStatus
@@ -122,12 +125,17 @@ namespace TPFramework
 
         public static void OnConnectFailed(ConnectCode codeId, string msg = "")
         {
-            DLog.Error("OnConnectFailed code:{0}, msg:{1}, ConnectingServer:{2}, WillReconnectLater:{3}, hasShowChoiceUI:{4}, proxyIndex:{5}, proxy_list.Count:{6}, QuickReconnCount:{7}, ConnectingTimer:{8}, TimeStartup:{9}", 
-                codeId, msg, ConnectingServer, WillReconnectLater, hasShowChoiceUI, pendingProxyIndx, proxy_list.Count, QuickReconnCount, ConnectingServerTimer, Time.realtimeSinceStartup);
-
             if (hasShowChoiceUI || ConnectingServer || WillReconnectLater || proxy_list.Count == 0)
                 return;
             
+            DLog.Error("OnConnectFailed code:{0}, msg:{1}, ConnectingServer:{2}, WillReconnectLater:{3}, hasShowChoiceUI:{4}, proxyIndex:{5}, proxy_list.Count:{6}, QuickReconnCount:{7}, ConnectingTimer:{8}, TimeStartup:{9}", 
+                codeId, msg, ConnectingServer, WillReconnectLater, hasShowChoiceUI, pendingProxyIndx, proxy_list.Count, QuickReconnCount, ConnectingServerTimer, Time.realtimeSinceStartup);
+
+            if (NetManager.GetSession().IsConnected())
+            {
+                NetManager.GetSession().Close();
+            }
+
             isLogin = false;
             if (QuickReconnCount >= proxy_list[pendingProxyIndx].retryTime)
             {
@@ -137,22 +145,19 @@ namespace TPFramework
                 if (pendingProxyIndx >= proxy_list.Count)
                 {
                     pendingProxyIndx = 0;
+                    hasShowChoiceUI = true;
                     
-                    // 重连失败，用户确认后重启游戏
-                    Action actionRestart = () =>
-                    {
-                        Reset();
-                        Boot.Reboot();
-                    };
-                    
-                    actionRestart();
+                    //TODO: 重连失败，用户确认后重启游戏
+                    onConnectFailed?.Invoke();
+                    // Action actionRestart = () =>
+                    // {
+                    //     Reset();
+                    //     Boot.Reboot();
+                    // };
+                    //
+                    // actionRestart();
                     return;
                 }
-            }
-
-            if (NetManager.GetSession().IsConnected())
-            {
-                NetManager.GetSession().Close();
             }
             
             // 稍微延迟一下了再重连
@@ -190,6 +195,7 @@ namespace TPFramework
 
         public static void Init()
         {
+            ArrayPool<byte>.Create(65536, 16);
             NetReachability.OnNetReachabilityChange += OnNetReachabilityChange;
         }
 
@@ -203,7 +209,6 @@ namespace TPFramework
                 {
                     ip = proxyList[i].ip,
                     port = proxyList[i].port,
-                    // chatproxy = proxyList[i].chatproxy,
                     retryTime = proxyList[i].retryTime
                 });
             }
@@ -218,27 +223,29 @@ namespace TPFramework
 
             hasShowChoiceUI = true;
 
-            // 显示网络连接失败的提示，待用户确认重连后重新连接
-            Action actionReconnect = () =>
-            {
-                // hasShowChoiceUI = false;
-                WillReconnectLater = ConnectingServer = hasShowChoiceUI = false;
-                ReconnectDelayTimer = ConnectingServerTimer = QuickReconnCount = pendingProxyIndx = 0;
+            //TODO: 显示网络连接失败的提示，待用户确认重连后重新连接
+            onConnectFailed?.Invoke();
 
-                if (proxy_list.Count == 0)
-                {
-                    // 还没获取到网关，直接重启游戏
-                    Reset();
-                    Boot.Reboot();
-                    return;
-                }
-
-                QuickReconnect();
-                NetReachability.Reset();
-            };
+            // Action actionReconnect = () =>
+            // {
+            //     // hasShowChoiceUI = false;
+            //     WillReconnectLater = ConnectingServer = hasShowChoiceUI = false;
+            //     ReconnectDelayTimer = ConnectingServerTimer = QuickReconnCount = pendingProxyIndx = 0;
+            //
+            //     if (proxy_list.Count == 0)
+            //     {
+            //         // 还没获取到网关，直接重启游戏
+            //         Reset();
+            //         Boot.Reboot();
+            //         return;
+            //     }
+            //
+            //     QuickReconnect();
+            //     NetReachability.Reset();
+            // };
 
             // 点确认后的操作
-            actionReconnect();
+            // actionReconnect();
         }
 
         public static void QuickReconnect()
@@ -246,7 +253,9 @@ namespace TPFramework
             DLog.Warning("QuickReconn =========== {0} {1} {2} {3}", JsonUtility.ToJson(proxy_list[pendingProxyIndx]),
                 NetManager.GetSession().IsConnected(), pendingProxyIndx, QuickReconnCount);
             
-            NetManager.GetSession().Close(true);
+            NetManager.GetSession().Close();
+            
+            onConnectDisconnected?.Invoke();
             
             ConnectingServer = true;
             ConnectingServerTimer = 0;
@@ -290,12 +299,12 @@ namespace TPFramework
             NetManager.GetSession().Connect(proxy.ip, proxy.port);
         }
 
-        public static void RegisterMsgHandle(Protocol.MsgType msgType, MessageHandler handle)
+        public static void RegisterMsgHandle(int msgType, MessageHandler handle)
         {
             NetMsgHandles[msgType] = handle;
         }
         
-        public static void UnRegisterMsgHandle(Protocol.MsgType msgType)
+        public static void UnRegisterMsgHandle(int msgType)
         {
             NetMsgHandles.Remove(msgType);
         }
@@ -303,69 +312,107 @@ namespace TPFramework
         public static void OnConnectSuccess()
         {
             isLogin = false;
+            // 标记连接成功
+            ConnectingServer = false;
+            
+            onConnectCompleted?.Invoke();
+
+            SendCheckConnection();
             
             ResetHeartBeatTimer();
             heartbeatStatus = HeartbeatStatus.Received;
         }
 
-        public static void SendMsg(Protocol.MsgType msgType, NetworkMessage content, MessageCallback callback,
+        public static void SendCheckConnection()
+        {
+            DLog.Log("SendCheckConnection START");
+            var msg = new CheckConnectionClient2Gate();
+            SendMsg(MsgType.CheckConnectionReq, msg, (type, content) =>
+            {
+                DLog.Log($"CheckConnectionReq: {type}, {content.GetType()}");
+                
+                var msg = CheckConnectionGate2Client.Parser.ParseFrom(content.Data);
+                if (!msg.Successful)
+                {
+                    DLog.Error("CheckConnectionReq failed");
+                    return true;
+                }
+                
+                DLog.Log("CheckConnectionReq successful, and will PlayerLoginClient2Gate");
+                
+                return true;
+            }, true, null);
+        }
+
+        public static void SendMsg(int msgType, IMessage content, MessageCallback callback,
             bool isWaiting, NetFailedCallback netFailedCallback)
         {
-            // 在发消息的时候，同时进行一次网络测试，检测包的收发情况
-            // if (msgType != Protocol.MsgType.HeartBeat)
+            if (msgType != MsgType.HeartBeatReqAck && content != null)
             {
                 CheckSendRecvTime();
             }
             
             if (ConnectingServer)
                 return;
+
+            var session = NetManager.GetSession();
+            if (session == null || !session.IsConnected())
+                return;
             
-            bool isOK = NetManager.GetSession().Send(msgType, content);
+            bool isOK = session.Send((int)msgType, content);
             if (!isOK)
             {
                 OnConnectFailed(ConnectCode.SendFailed, "SendMsg failed");
                 return;
             }
 
-            if (callback != null)
-            {
+            // if (callback != null)
+            // {
                 Data data = new Data();
                 data.CallbackFunc = callback;
                 data.IsWaiting = isWaiting;
                 data.NetFailedCallback = netFailedCallback;
-                data.MsgType = msgType;
+                data.MsgType = (int)msgType;
                 data.WaitingShow = false;
                 if (isWaiting)
                     data.WaitingDelay = Time.realtimeSinceStartup + WaitingDelay;
                 data.TimeOut = Time.realtimeSinceStartup + TimeOut;
                 CallbackList.Add(data);
-            }
-
+            // }
         }
 
-        public static void DispatchMessage(Protocol.MsgType msgType, NetworkMessage content)
+        public static void DispatchMessage(int msgType, NetworkMessage content)
         {
             lastRecvTime = TimeUtils.GetCurServerTimeSec();
 
+            int msgIdx = -1;
             for (int i = 0; i < CallbackList.Count; i++)
             {
                 Data data = CallbackList[i];
-                bool isHandled = data.CallbackFunc(msgType, content);
-                if (isHandled)
+                if (data.MsgType != msgType)
+                    continue;
+
+                if (data.CallbackFunc == null)
+                    msgIdx = i;
+                else
                 {
-                    ResetHeartBeatTimer();
-                    // float waitDur = Time.realtimeSinceStartup + TimeOut - data.TimeOut;
-                    if (data.IsWaiting && data.WaitingShow)
+                    bool isHandled = data.CallbackFunc((int) msgType, content);
+                    if (isHandled)
                     {
-                        // 显示转圈的界面
-                        //TODO: 显示转圈的界面
+                        ResetHeartBeatTimer();
+                        // float waitDur = Time.realtimeSinceStartup + TimeOut - data.TimeOut;
+                        if (data.IsWaiting && data.WaitingShow)
+                        {
+                            // 显示转圈的界面
+                            //TODO: 显示转圈的界面
+                        }
+
+                        CallbackList.RemoveAt(i);
+                        TimeOutCount = 0;
+
+                        // 设置了直接回调的消息，只有理一个待处理，完成后返回即可
+                        return;
                     }
-                    
-                    CallbackList.RemoveAt(i);
-                    TimeOutCount = 0;
-                    
-                    // 设置了直接回调的消息，只有理一个待处理，完成后返回即可
-                    return;
                 }
             }
             
@@ -377,6 +424,11 @@ namespace TPFramework
             }
             
             msgHandle(content);
+            if (msgIdx >= 0)
+            {
+                CallbackList.RemoveAt(msgIdx);
+                TimeOutCount = 0;
+            }
         }
 
         public static void Update(int dt)
@@ -406,7 +458,7 @@ namespace TPFramework
             {
                 NetworkMessage msg = messageQueue[0];
                 messageQueue.RemoveAt(0);
-                DispatchMessage(msg.GetMessageType(), msg);
+                DispatchMessage(msg.GetMsgType(), msg);
             }
 
             // 判断是否有 waiting 的消息
@@ -441,6 +493,9 @@ namespace TPFramework
             HeartbeatTimer = HEARTBEATT_INTERVAL;
         }
 
+        // 以下2种情况时，会加快下次心跳的时间间隔
+        // 1. 当上次收到服务器消息超过5秒， 且上次发消息过了1-5秒
+        // 2. 如果多次消息超时(>=3)，即发消息后未收到服务器的回应（可能服务器报错，而不是网络问题）， 只要收到一次服务的回应，就会重置超时次数
         private static void FastTestServerByHeartBeat()
         {
             if (!isLogin && HeartbeatTimer > 0)
@@ -466,7 +521,7 @@ namespace TPFramework
             long deltaRecvTime = now - lastRecvTime;
             if (deltaRecvTime > 5 && deltaSendTime < 5 && deltaSendTime > 1)
             {
-                DLog.Error("CheckSendRecvTime maybe lost connection, deltaSendTime:{0}, deltaRecvTime:{1}", deltaSendTime, deltaRecvTime);
+                DLog.Warning("CheckSendRecvTime maybe lost connection, deltaSendTime:{0}, deltaRecvTime:{1}", deltaSendTime, deltaRecvTime);
                 lastSendTime = lastRecvTime = now;
                 FastTestServerByHeartBeat();
             }
@@ -511,20 +566,26 @@ namespace TPFramework
                     }
 
                     TimeOutCount += 1;
-                    DLog.Error("Warning!!! timeout message, {0} {1}", v.MsgType.ToString(), TimeOutCount);
+                    DLog.Error("Warning!!! timeout message, {0} {1}/{2}", v.MsgType, TimeOutCount, MaxPackTimeOutCount);
 
                     v.TimeOut = GameNow + TimeOut;
                     if (v.alreadyTimeOut)
                     {
-                        if (v.MsgType == Protocol.MsgType.LOGIN_REQ)
+                        if (v.MsgType == (int)MsgType.PlayerLoginReq)
                         {
                             OnConnectFailed(ConnectCode.LoginTimeout, "login timeout");
                             return;
                         }
+                        
+                        // 将超时的消息移出待处理列表
                         remove.Add(i);
                     }
                     else
+                    {
                         v.alreadyTimeOut = true;
+                    }
+                    
+                    // 如果有多个消息超时，就发送一次心跳, 如果多次心跳没回应，就会提示断开连接， 但如果心跳正常，只是某些消息没回应，逻辑上其实是忽略了这个错误
                     if (TimeOutCount >= MaxPackTimeOutCount)
                     {
                         TimeOutCount = 0;

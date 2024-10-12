@@ -16,7 +16,7 @@ namespace TPFramework
                 {
                     _instance = GameObject.FindObjectOfType(typeof(T)) as T;
                     if (_instance == null)
-                        _instance = new GameObject("SingletonUnity_" + typeof(T), typeof(T)).GetComponent<T>();
+                        _instance = new GameObject(typeof(T).ToString(), typeof(T)).GetComponent<T>();
 
                     DontDestroyOnLoad(_instance);
                 }

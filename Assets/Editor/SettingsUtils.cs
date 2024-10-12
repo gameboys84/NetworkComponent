@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using TEngine;
 using UnityEngine;
 
 public static class SettingsUtils
